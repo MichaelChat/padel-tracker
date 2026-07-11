@@ -358,10 +358,7 @@ export default function App() {
       <div style={{ ...cardStyle, marginTop: 24 }}>
         <p style={{ margin: "0 0 8px", fontSize: 12, fontWeight: 700, color: C.sand }}>Format</p>
         <ul style={{ margin: 0, padding: "0 0 0 16px", color: C.dimmed, fontSize: 12, lineHeight: 2 }}>
-          <li>10 players · 2 courts · 2v2 · 8 matches + 2 rests each</li>
-          <li>16 min rounds · Ready by 5:15 PM · Start 5:30 PM</li>
           <li>Win = 2 pts · Draw = 1 pt · Loss = 0 pts</li>
-          <li>Top 2 advance to inter-Americano finals</li>
         </ul>
       </div>
     </div>
@@ -415,17 +412,16 @@ export default function App() {
         return (
           <div key={p.name} style={{
             ...cardStyle,
-            border: rank < 2 ? `1px solid ${C.sand}55` : cardStyle.border,
-            background: rank < 2 ? `${C.sand}0c` : C.card,
+            border: rank < 3 ? `1px solid ${C.sand}55` : cardStyle.border,
+            background: rank < 3 ? `${C.sand}0c` : C.card,
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <div style={medalStyle(rank)}>{rank + 1}</div>
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 800, fontSize: 15 }}>{p.name}</div>
-                {rank < 2 && <div style={{ fontSize: 11, color: C.sand, marginTop: 2 }}>🏆 Advances to finals</div>}
               </div>
               <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 22, fontWeight: 900, color: rank < 2 ? C.sand : C.white }}>{p.matchPoints}</div>
+                <div style={{ fontSize: 22, fontWeight: 900, color: rank < 3 ? C.sand : C.white }}>{p.matchPoints}</div>
                 <div style={{ fontSize: 10, color: C.muted }}>match pts</div>
               </div>
               <div style={{ textAlign: "right", minWidth: 36 }}>
@@ -447,15 +443,6 @@ export default function App() {
           </div>
         );
       })}
-
-      {standings.length > 0 && (
-        <div style={{ ...cardStyle, marginTop: 6, textAlign: "center" }}>
-          <p style={{ margin: 0, fontSize: 12, color: C.muted }}>
-            Americano players are <span style={{ color: C.coral }}>ineligible</span> for the September tournament —
-            except <span style={{ color: C.sand }}>top 2</span> who are invited if they wish.
-          </p>
-        </div>
-      )}
     </div>
   );
 
