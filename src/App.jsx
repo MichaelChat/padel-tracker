@@ -301,7 +301,7 @@ const runExportPDF = async (standings, rounds) => {
       if (court.scoreA != null) {
         const won  = court.scoreA > court.scoreB;
         const drew = court.scoreA === court.scoreB;
-        const sc   = won ? GREEN : drew ? SAND : CORAL;
+        const sc   = won ? GREEN : drew ? WHITE : CORAL;
         doc.setFont("helvetica", "bold"); doc.setTextColor(sc[0], sc[1], sc[2]);
         doc.text(court.scoreA + " - " + court.scoreB, W - M - 5, y + 5.5, { align: "right" });
       } else {
