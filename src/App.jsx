@@ -26,12 +26,9 @@ const shuffle = (arr) => {
 };
 
 // Who rested in the last round
-const getLastRested = (rounds) => {
-  if (!rounds.length) return [];
-  return rounds[rounds.length - 1]?.resting || [];
-};
+const getLastRested = (rounds) => rounds.length ? (rounds[rounds.length - 1]?.resting || []) : [];
 
-// Who has rested 2+ rounds in a row (must play next)
+// Who rested 2+ rounds in a row → must play next
 const getMustPlay = (rounds) => {
   if (rounds.length < 2) return [];
   const last       = rounds[rounds.length - 1]?.resting || [];
@@ -39,74 +36,297 @@ const getMustPlay = (rounds) => {
   return last.filter((n) => secondLast.includes(n));
 };
 
-// Players who have never appeared in any round (joined mid-tournament)
+// Players who never appeared in any round
 const getNewPlayers = (playerNames, rounds) => {
-  if (!rounds.length) return [];
-  const everSeen = new Set(
-    rounds.flatMap((r) => [
-      ...(r.resting || []),
-      ...r.courts.flatMap((c) => [...c.teamA, ...c.teamB]),
-    ])
-  );
+  if (!rounds.length) return playerNames.slice(); // all new if no rounds yet
+  const everSeen = new Set(rounds.flatMap((r) => [
+    ...(r.resting || []),
+    ...r.courts.flatMap((c) => [...c.teamA, ...c.teamB]),
+  ]));
   return playerNames.filter((n) => !everSeen.has(n));
 };
 
-// Count how many games each player has played across all rounds
+// Games played per player
 const getPlayCounts = (playerNames, rounds) => {
   const counts = {};
   playerNames.forEach((n) => { counts[n] = 0; });
   rounds.forEach((r) => {
     r.courts.forEach((c) => {
-      [...c.teamA, ...c.teamB].filter(Boolean).forEach((n) => {
-        if (counts[n] != null) counts[n]++;
-      });
+      [...c.teamA, ...c.teamB].filter(Boolean).forEach((n) => { if (counts[n] != null) counts[n]++; });
     });
   });
   return counts;
 };
 
-// Sort by play count ascending (least played first), break ties randomly
 const sortByPlayCount = (names, playCounts) =>
   shuffle(names).sort((a, b) => playCounts[a] - playCounts[b]);
 
-// Suggest pairings: fair play distribution — least played gets priority
+// ── Pairing history ───────────────────────────────────────────────
+// Returns a map of "A|B" → count for all partner and opponent pairs seen
+const getPairingHistory = (rounds) => {
+  const partners  = {}; // played on same team
+  const opponents = {}; // played against each other
+
+  const key = (a, b) => [a, b].sort().join("|");
+  const inc  = (map, k) => { map[k] = (map[k] || 0) + 1; };
+
+  rounds.forEach((r) => {
+    r.courts.forEach((c) => {
+      const [a1, a2] = c.teamA.filter(Boolean);
+      const [b1, b2] = c.teamB.filter(Boolean);
+      if (a1 && a2) inc(partners,  key(a1, a2));
+      if (b1 && b2) inc(partners,  key(b1, b2));
+      [a1, a2].filter(Boolean).forEach((a) =>
+        [b1, b2].filter(Boolean).forEach((b) => inc(opponents, key(a, b)))
+      );
+    });
+  });
+  return { partners, opponents };
+};
+
+// Score how "stale" a set of courts is (lower = fresher pairings)
+const pairingScore = (courts, history) => {
+  let score = 0;
+  courts.forEach((c) => {
+    const key = (a, b) => [a, b].sort().join("|");
+    const [a1, a2] = c.teamA.filter(Boolean);
+    const [b1, b2] = c.teamB.filter(Boolean);
+    if (a1 && a2) score += (history.partners[key(a1, a2)] || 0) * 3;
+    if (b1 && b2) score += (history.partners[key(b1, b2)] || 0) * 3;
+    [a1, a2].filter(Boolean).forEach((a) =>
+      [b1, b2].filter(Boolean).forEach((b) => { score += (history.opponents[key(a, b)] || 0); })
+    );
+  });
+  return score;
+};
+
+// ── Suggest pairings ──────────────────────────────────────────────
+// Runs N candidate arrangements and picks the one with freshest pairings
 const suggestPairings = (playerNames, numCourts, rounds) => {
   const seats      = numCourts * 4;
   const mustPlay   = getMustPlay(rounds);
   const playCounts = getPlayCounts(playerNames, rounds);
+  const history    = getPairingHistory(rounds);
 
-  // mustPlay players are guaranteed a spot
-  const guaranteed = [...new Set([...mustPlay])];
+  // Guaranteed players (must play)
+  const guaranteed = [...new Set(mustPlay)];
 
-  // Everyone else sorted by play count ascending (fewest games → plays next)
+  // Others sorted by least games played; random tiebreak
   const others = sortByPlayCount(
     playerNames.filter((n) => !guaranteed.includes(n)),
     playCounts
   );
 
-  // Fill playing: guaranteed first, then sorted others up to seats
-  let playing = [...guaranteed];
-  if (playing.length > seats) playing = shuffle(playing).slice(0, seats);
-  playing = [...playing, ...others.slice(0, seats - playing.length)];
+  // Determine who plays this round
+  let pool = [...guaranteed];
+  if (pool.length > seats) pool = shuffle(pool).slice(0, seats);
+  pool = [...pool, ...others.slice(0, seats - pool.length)];
+  if (pool.length < seats) pool = shuffle(playerNames).slice(0, seats);
 
-  // Fallback
-  if (playing.length < seats) playing = shuffle(playerNames).slice(0, seats);
+  // Try many random arrangements of pool into courts, pick freshest
+  const ATTEMPTS = 120;
+  let bestCourts = null;
+  let bestScore  = Infinity;
 
-  playing = shuffle(playing);
-  const resting = playerNames.filter((n) => !playing.includes(n));
-
-  const courts = [];
-  for (let i = 0; i < numCourts; i++) {
-    const four = playing.slice(i * 4, i * 4 + 4);
-    if (four.length < 4) break;
-    courts.push({ teamA: [four[0], four[1]], teamB: [four[2], four[3]], scoreA: null, scoreB: null });
+  for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+    const arr = shuffle(pool);
+    const courts = [];
+    for (let i = 0; i < numCourts; i++) {
+      const four = arr.slice(i * 4, i * 4 + 4);
+      if (four.length < 4) break;
+      // Also try swapping partners within team to minimise repeats
+      courts.push({ teamA: [four[0], four[1]], teamB: [four[2], four[3]], scoreA: null, scoreB: null });
+    }
+    if (courts.length < numCourts) continue;
+    const score = pairingScore(courts, history);
+    if (score < bestScore) { bestScore = score; bestCourts = courts; }
   }
-  return { courts, resting };
+
+  const resting = playerNames.filter((n) => !pool.includes(n));
+  return { courts: bestCourts || [], resting };
 };
 
-const recalcStandings = (players, rounds) => {
+// ── Freshen label ─────────────────────────────────────────────────
+
+// ── PDF Export (called from within App) ──────────────────────────
+const runExportPDF = async (standings, rounds) => {
+  if (!window.jspdf) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+
+  const W = 210;
+  const M = 14;
+  const BG      = [13,  31,  45];
+  const SURFACE = [21,  40,  64];
+  const SAND    = [245, 200, 66];
+  const GREEN   = [74,  222, 128];
+  const CORAL   = [248, 113, 113];
+  const WHITE   = [240, 244, 248];
+  const MUTED   = [91,  127, 166];
+  const DIMMED  = [143, 173, 200];
+  const COURT_C = [SAND, [96, 165, 250], GREEN, [167, 139, 250]];
+
+  let y = 0;
+  const newPage = () => { doc.addPage(); y = 0; };
+  const checkY  = (n) => { if (y + n > 280) newPage(); };
+  const rgb     = (c) => doc.setTextColor(c[0], c[1], c[2]);
+  const fill    = (c) => doc.setFillColor(c[0], c[1], c[2]);
+
+  // ── Header bar ─────────────────────────────────────────────────
+  fill(BG); doc.rect(0, 0, W, 36, "F");
+  doc.setFontSize(20); doc.setFont("helvetica", "bold"); rgb(WHITE);
+  doc.text("PADEL // AMERICANO", M, 16);
+  doc.setFontSize(9); doc.setFont("helvetica", "normal"); rgb(MUTED);
+  const dateStr = new Date().toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" });
+  doc.text(`Tournament Report · ${dateStr}`, M, 24);
+  doc.text(`${rounds.length} rounds · ${standings.length} players`, M, 30);
+  fill(SAND); doc.roundedRect(W - M - 20, 10, 20, 8, 2, 2, "F");
+  doc.setFontSize(7); doc.setFont("helvetica", "bold"); doc.setTextColor(13, 31, 45);
+  doc.text("FUN", W - M - 10, 15.5, { align: "center" });
+  y = 44;
+
+  // ── Standings section ──────────────────────────────────────────
+  fill(SURFACE); doc.rect(0, y, W, 10, "F");
+  doc.setFontSize(13); doc.setFont("helvetica", "bold"); rgb(WHITE);
+  doc.text("Final Standings", M, y + 7);
+  y += 14;
+
+  // Table header
+  fill(SURFACE); doc.rect(M, y, W - M * 2, 7, "F");
+  doc.setFontSize(7); doc.setFont("helvetica", "bold"); rgb(MUTED);
+  doc.text("#",          M + 2,        y + 5);
+  doc.text("Player",    M + 10,       y + 5);
+  doc.text("Match Pts", W - M - 54,   y + 5, { align: "right" });
+  doc.text("Game Pts",  W - M - 30,   y + 5, { align: "right" });
+  doc.text("Played",    W - M - 8,    y + 5, { align: "right" });
+  y += 9;
+
+  standings.forEach((p, rank) => {
+    checkY(14);
+    const isTop = rank < 3;
+
+    // Row tint for top 2
+    if (isTop) {
+      doc.setFillColor(245, 200, 66); doc.setGState(new doc.GState({ opacity: 0.08 }));
+      doc.rect(M, y - 1, W - M * 2, 13, "F");
+      doc.setGState(new doc.GState({ opacity: 1 }));
+    }
+
+    // Medal circle
+    const medalCol = rank === 0 ? [251, 191, 36] : rank === 1 ? [148, 163, 184] : rank === 2 ? [180, 83, 9] : MUTED;
+    doc.setFillColor(medalCol[0], medalCol[1], medalCol[2]);
+    doc.circle(M + 4, y + 3, 3, "F");
+    doc.setFontSize(6); doc.setFont("helvetica", "bold"); doc.setTextColor(13, 31, 45);
+    doc.text(String(rank + 1), M + 4, y + 4.5, { align: "center" });
+
+    // Name
+    doc.setFontSize(9); doc.setFont("helvetica", isTop ? "bold" : "normal");
+    rgb(isTop ? SAND : WHITE);
+    doc.text(p.name, M + 10, y + 5);
+
+    // Stats
+    doc.setFont("helvetica", "bold"); rgb(isTop ? SAND : WHITE);
+    doc.text(String(p.matchPoints),  W - M - 54, y + 5, { align: "right" });
+    doc.setFont("helvetica", "normal"); rgb(DIMMED);
+    doc.text(String(p.gamePoints),   W - M - 30, y + 5, { align: "right" });
+    doc.text(String(p.gamesPlayed),  W - M - 8,  y + 5, { align: "right" });
+
+    // W/D/L/R strip
+    const strip = rounds.map((r) => {
+      if (!r) return "";
+      if (r.resting && r.resting.includes(p.name)) return "R";
+      const court = r.courts.find((c) => c && (c.teamA.includes(p.name) || c.teamB.includes(p.name)));
+      if (!court || court.scoreA == null) return "";
+      const mine = court.teamA.includes(p.name) ? court.scoreA : court.scoreB;
+      const them = court.teamA.includes(p.name) ? court.scoreB : court.scoreA;
+      return mine > them ? "W" : mine === them ? "D" : "L";
+    }).filter((s) => s !== "");
+
+    let sx = M + 10;
+    strip.forEach((s) => {
+      const sc = s === "W" ? GREEN : s === "D" ? SAND : s === "L" ? CORAL : MUTED;
+      doc.setFillColor(sc[0], sc[1], sc[2]);
+      doc.roundedRect(sx, y + 6, 5, 3.5, 0.5, 0.5, "F");
+      doc.setFontSize(4); doc.setFont("helvetica", "bold"); doc.setTextColor(13, 31, 45);
+      doc.text(s, sx + 2.5, y + 8.8, { align: "center" });
+      sx += 6;
+    });
+
+    y += 14;
+  });
+
+  // ── Rounds section ─────────────────────────────────────────────
+  y += 6;
+  checkY(14);
+  fill(SURFACE); doc.rect(0, y, W, 10, "F");
+  doc.setFontSize(13); doc.setFont("helvetica", "bold"); rgb(WHITE);
+  doc.text("Round Results", M, y + 7);
+  y += 14;
+
+  rounds.forEach((round, ri) => {
+    if (!round) return;
+    checkY(12 + round.courts.length * 10 + 6);
+
+    // Round header
+    fill(SURFACE); doc.rect(M, y, W - M * 2, 7, "F");
+    doc.setFontSize(8); doc.setFont("helvetica", "bold"); rgb(SAND);
+    doc.text("ROUND " + (ri + 1), M + 3, y + 5);
+    if (round.resting && round.resting.length > 0) {
+      doc.setFont("helvetica", "normal"); rgb(MUTED);
+      doc.text("Resting: " + round.resting.join(", "), M + 28, y + 5);
+    }
+    y += 9;
+
+    round.courts.forEach((court, ci) => {
+      checkY(10);
+      const cc = COURT_C[ci % COURT_C.length];
+      doc.setFillColor(cc[0], cc[1], cc[2]);
+      doc.roundedRect(M + 2, y, W - M * 2 - 4, 8, 1, 1, "F");
+      doc.setFontSize(7); doc.setFont("helvetica", "bold"); doc.setTextColor(13, 31, 45);
+      doc.text("C" + (ci + 1), M + 5, y + 5.5);
+
+      const teamA = court.teamA.filter(Boolean).join(" & ");
+      const teamB = court.teamB.filter(Boolean).join(" & ");
+      doc.setFont("helvetica", "normal"); doc.setTextColor(13, 31, 45);
+      doc.text(teamA + "  vs  " + teamB, M + 12, y + 5.5);
+
+      if (court.scoreA != null) {
+        const won  = court.scoreA > court.scoreB;
+        const drew = court.scoreA === court.scoreB;
+        const sc   = won ? GREEN : drew ? SAND : CORAL;
+        doc.setFont("helvetica", "bold"); doc.setTextColor(sc[0], sc[1], sc[2]);
+        doc.text(court.scoreA + " - " + court.scoreB, W - M - 5, y + 5.5, { align: "right" });
+      } else {
+        doc.setFont("helvetica", "normal"); rgb(MUTED);
+        doc.text("no score", W - M - 5, y + 5.5, { align: "right" });
+      }
+      y += 10;
+    });
+    y += 4;
+  });
+
+  // ── Page footers ───────────────────────────────────────────────
+  const total = doc.getNumberOfPages();
+  for (let i = 1; i <= total; i++) {
+    doc.setPage(i);
+    doc.setFontSize(7); doc.setFont("helvetica", "normal"); rgb(MUTED);
+    doc.text("Padel Americano FUN  ·  Page " + i + " of " + total, W / 2, 292, { align: "center" });
+  }
+
+  doc.save("padel-americano-results.pdf");
+};
+
+
   const totals = {};
-  players.forEach((p) => { totals[p.name] = { matchPoints: 0, gamePoints: 0 }; });
+  players.forEach((p) => { totals[p.name] = { matchPoints: 0, gamePoints: 0, gamesPlayed: 0 }; });
   rounds.forEach((round) => {
     if (!round) return;
     round.courts.forEach((court) => {
@@ -114,8 +334,8 @@ const recalcStandings = (players, rounds) => {
       const { teamA, teamB, scoreA, scoreB } = court;
       const mpA = scoreA > scoreB ? 2 : scoreA === scoreB ? 1 : 0;
       const mpB = scoreB > scoreA ? 2 : scoreA === scoreB ? 1 : 0;
-      teamA.filter(Boolean).forEach((n) => { if (totals[n]) { totals[n].matchPoints += mpA; totals[n].gamePoints += scoreA; } });
-      teamB.filter(Boolean).forEach((n) => { if (totals[n]) { totals[n].matchPoints += mpB; totals[n].gamePoints += scoreB; } });
+      teamA.filter(Boolean).forEach((n) => { if (totals[n]) { totals[n].matchPoints += mpA; totals[n].gamePoints += scoreA; totals[n].gamesPlayed++; } });
+      teamB.filter(Boolean).forEach((n) => { if (totals[n]) { totals[n].matchPoints += mpB; totals[n].gamePoints += scoreB; totals[n].gamesPlayed++; } });
     });
   });
   return players.map((p) => ({ ...p, ...totals[p.name] }));
@@ -151,6 +371,7 @@ const medalStyle = (rank) => ({
   fontSize: 12, fontWeight: 800, color: "#0d1f2d",
 });
 
+
 // ── PlayerSelect ──────────────────────────────────────────────────
 function PlayerSelect({ value, onChange, playerNames, usedNames, highlight = [] }) {
   const options = playerNames.filter((n) => n === value || !usedNames.includes(n));
@@ -176,9 +397,7 @@ function CourtBlock({ courtIdx, color, court, onChange, playerNames, usedOther, 
 
   return (
     <div style={{ background: `${color}0d`, border: `1px solid ${color}44`, borderRadius: 10, padding: "12px 14px", marginBottom: 12 }}>
-      <div style={{ fontSize: 12, fontWeight: 700, color, letterSpacing: "0.08em", marginBottom: 10 }}>
-        COURT {courtIdx + 1}
-      </div>
+      <div style={{ fontSize: 12, fontWeight: 700, color, letterSpacing: "0.08em", marginBottom: 10 }}>COURT {courtIdx + 1}</div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: 6, alignItems: "center", marginBottom: 10 }}>
         <div>
           <div style={{ fontSize: 10, color: C.green, marginBottom: 4, fontWeight: 600 }}>TEAM A</div>
@@ -196,16 +415,13 @@ function CourtBlock({ courtIdx, color, court, onChange, playerNames, usedOther, 
           </div>
         </div>
       </div>
-      {/* Score */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <input style={{ ...inputStyle, fontSize: 24, fontWeight: 800, textAlign: "center", flex: 1 }}
-          type="number" min="0" inputMode="numeric"
-          value={court.scoreA ?? ""} placeholder="0"
+          type="number" min="0" inputMode="numeric" value={court.scoreA ?? ""} placeholder="0"
           onChange={(e) => onChange({ ...court, scoreA: e.target.value === "" ? null : parseInt(e.target.value, 10) })} />
         <span style={{ color: C.muted, fontSize: 18, fontWeight: 700 }}>–</span>
         <input style={{ ...inputStyle, fontSize: 24, fontWeight: 800, textAlign: "center", flex: 1 }}
-          type="number" min="0" inputMode="numeric"
-          value={court.scoreB ?? ""} placeholder="0"
+          type="number" min="0" inputMode="numeric" value={court.scoreB ?? ""} placeholder="0"
           onChange={(e) => onChange({ ...court, scoreB: e.target.value === "" ? null : parseInt(e.target.value, 10) })} />
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3 }}>
@@ -236,40 +452,38 @@ function RoundModal({ roundIdx, round, players, numCourts, rounds, onSave, onClo
   const resting = playerNames.filter((n) => !usedAll.includes(n));
 
   const handleSuggest = () => {
-    const suggestion = suggestPairings(playerNames, numCourts, rounds.slice(0, roundIdx));
+    const suggestion = suggestPairings(playerNames, numCourts, prevRounds);
     setCourts(suggestion.courts);
   };
 
-  const updateCourt = (i, court) => {
-    setCourts((prev) => { const next = [...prev]; next[i] = court; return next; });
-  };
+  const updateCourt = (i, c) => setCourts((prev) => { const next = [...prev]; next[i] = c; return next; });
+  const handleSave  = () => onSave({ courts, resting });
 
-  const handleSave = () => onSave({ courts, resting });
+  const minCount = Math.min(...Object.values(playCounts));
 
   return (
     <div style={overlayStyle} onClick={onClose}>
       <div style={modalStyle} onClick={(e) => e.stopPropagation()}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
           <h3 style={{ margin: 0, fontSize: 17, fontWeight: 800 }}>Round {roundIdx + 1}</h3>
           <button style={{ ...btn("ghost"), padding: "4px 10px", fontSize: 12 }} onClick={onClose}>✕</button>
         </div>
 
-        {/* Games played overview */}
+        {/* Games played badges */}
         {prevRounds.length > 0 && (
-          <div style={{ background: `${C.sand}10`, border: `1px solid ${C.sand}33`, borderRadius: 8, padding: "10px 12px", marginBottom: 12 }}>
-            <div style={{ fontSize: 11, color: C.sand, fontWeight: 700, marginBottom: 6 }}>GAMES PLAYED</div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          <div style={{ background: `${C.muted}18`, borderRadius: 8, padding: "10px 12px", marginBottom: 10 }}>
+            <div style={{ fontSize: 10, color: C.muted, fontWeight: 700, marginBottom: 6, letterSpacing: "0.08em" }}>GAMES PLAYED</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
               {sortByPlayCount(playerNames, playCounts).map((n) => {
                 const count  = playCounts[n];
                 const isNew  = newPlayers.includes(n);
                 const isMust = mustPlay.includes(n);
-                const minCount = Math.min(...Object.values(playCounts));
                 const col    = isMust ? C.coral : isNew ? C.green : count === minCount ? C.sand : C.dimmed;
                 return (
                   <div key={n} style={{ display: "flex", alignItems: "center", gap: 4, background: `${col}18`, border: `1px solid ${col}44`, borderRadius: 6, padding: "3px 8px" }}>
                     <span style={{ fontSize: 11, color: C.white }}>{n}</span>
                     <span style={{ fontSize: 10, fontWeight: 700, color: col }}>
-                      {isNew ? "NEW" : isMust ? `${count} must` : `${count}`}
+                      {isNew ? "NEW" : isMust ? `${count} ⚠` : count}
                     </span>
                   </div>
                 );
@@ -279,18 +493,14 @@ function RoundModal({ roundIdx, round, players, numCourts, rounds, onSave, onClo
         )}
 
         {/* Suggest button */}
-        <button style={{ ...btn("ghost"), width: "100%", marginBottom: 14, border: `1px dashed ${C.muted}`, color: C.dimmed }}
+        <button style={{ ...btn("ghost"), width: "100%", marginBottom: 12, border: `1px dashed ${C.muted}`, color: C.dimmed }}
           onClick={handleSuggest}>
-          🎲 Suggest random pairings
+          🎲 Suggest pairings
         </button>
 
         {courts.map((court, i) => (
-          <CourtBlock
-            key={i}
-            courtIdx={i}
-            color={COURT_COLORS[i % COURT_COLORS.length]}
-            court={court}
-            onChange={(c) => updateCourt(i, c)}
+          <CourtBlock key={i} courtIdx={i} color={COURT_COLORS[i % COURT_COLORS.length]}
+            court={court} onChange={(c) => updateCourt(i, c)}
             playerNames={playerNames}
             usedOther={courts.filter((_, ci) => ci !== i).flatMap((c) => [...c.teamA, ...c.teamB]).filter(Boolean)}
             priorityPlayers={priorityPlayers}
@@ -298,9 +508,9 @@ function RoundModal({ roundIdx, round, players, numCourts, rounds, onSave, onClo
         ))}
 
         {/* Resting */}
-        <div style={{ padding: "8px 12px", background: `${C.coral}0f`, borderRadius: 8, border: `1px solid ${C.coral}33`, marginBottom: 16 }}>
-          <span style={{ fontSize: 12, color: C.coral, fontWeight: 600 }}>Resting this round: </span>
-          <span style={{ fontSize: 12, color: C.dimmed }}>{resting.length > 0 ? resting.join(", ") : "Everyone is assigned"}</span>
+        <div style={{ padding: "8px 12px", background: `${C.muted}18`, borderRadius: 8, border: `1px solid ${C.muted}33`, marginBottom: 14 }}>
+          <span style={{ fontSize: 12, color: C.dimmed, fontWeight: 600 }}>Resting: </span>
+          <span style={{ fontSize: 12, color: C.dimmed }}>{resting.length > 0 ? resting.join(", ") : "Everyone assigned"}</span>
         </div>
 
         <div style={{ display: "flex", gap: 8 }}>
@@ -341,7 +551,7 @@ function RoundRow({ roundIdx, round, onClick }) {
             );
           })}
           {round.resting?.length > 0 && (
-            <div style={{ fontSize: 10, color: C.coral, marginTop: 2 }}>Resting: {round.resting.join(", ")}</div>
+            <div style={{ fontSize: 10, color: C.dimmed, marginTop: 2 }}>Resting: {round.resting.join(", ")}</div>
           )}
         </div>
         <span style={{ color: C.muted, fontSize: 18 }}>›</span>
@@ -350,6 +560,7 @@ function RoundRow({ roundIdx, round, onClick }) {
   );
 }
 
+
 // ── Main App ──────────────────────────────────────────────────────
 export default function App() {
   const [players,      setPlayers]      = useState(() => load(LS.players, []));
@@ -357,7 +568,7 @@ export default function App() {
   const [numCourts,    setNumCourts]    = useState(() => load(LS.courts,  2));
   const [view,         setView]         = useState(() => load(LS.view,    "setup"));
   const [nameInput,    setNameInput]    = useState("");
-  const [editingRound, setEditing]      = useState(null); // index or "new"
+  const [editingRound, setEditing]      = useState(null);
   const [confirmReset, setConfirmReset] = useState(false);
 
   useEffect(() => { save(LS.players, players); }, [players]);
@@ -377,35 +588,30 @@ export default function App() {
   const saveRound = useCallback((idx, data) => {
     setRounds((prev) => {
       const next = [...prev];
-      if (idx === "new") { next.push(data); }
-      else { next[idx] = data; }
+      if (idx === "new") next.push(data);
+      else next[idx] = data;
       return next;
     });
     setEditing(null);
   }, []);
 
-  const deleteLastRound = useCallback(() => {
-    setRounds((prev) => prev.slice(0, -1));
-  }, []);
+  const deleteLastRound = useCallback(() => setRounds((prev) => prev.slice(0, -1)), []);
 
   const resetAll = () => {
     setPlayers([]); setRounds([]); setNumCourts(2); setView("setup"); setConfirmReset(false);
-    [LS.players, LS.rounds, LS.courts, LS.view].forEach((k) => save(k, null));
+    Object.values(LS).forEach((k) => save(k, null));
   };
 
   const updatedPlayers = recalcStandings(players, rounds);
   const standings = [...updatedPlayers].sort((a, b) => b.matchPoints - a.matchPoints || b.gamePoints - a.gamePoints);
-
-  // Which round index is being edited
   const editIdx = editingRound === "new" ? rounds.length : editingRound;
 
-  // ── Setup view ────────────────────────────────────────────────
+  // ── Setup ─────────────────────────────────────────────────────
   const SetupView = (
     <div style={pageStyle}>
       <h2 style={{ margin: "0 0 4px", fontSize: 22, fontWeight: 800 }}>Setup</h2>
       <p style={{ margin: "0 0 20px", color: C.muted, fontSize: 14 }}>Add players and pick number of courts.</p>
 
-      {/* Courts selector */}
       <div style={{ ...cardStyle, marginBottom: 18 }}>
         <label style={labelStyle}>Number of courts</label>
         <div style={{ display: "flex", gap: 8 }}>
@@ -419,12 +625,10 @@ export default function App() {
           ))}
         </div>
         <p style={{ margin: "8px 0 0", fontSize: 12, color: C.muted }}>
-          {numCourts} court{numCourts > 1 ? "s" : ""} → {numCourts * 4} players active per round, {" "}
-          {Math.max(0, players.length - numCourts * 4)} resting
+          {numCourts} court{numCourts > 1 ? "s" : ""} → {numCourts * 4} active, {Math.max(0, players.length - numCourts * 4)} resting per round
         </p>
       </div>
 
-      {/* Add player */}
       <div style={{ marginBottom: 14 }}>
         <label style={labelStyle}>Add player</label>
         <div style={{ display: "flex", gap: 8 }}>
@@ -452,9 +656,7 @@ export default function App() {
 
       {players.length >= numCourts * 4 && (
         <button style={{ ...btn("primary"), width: "100%", padding: 14, fontSize: 15, marginTop: 8 }}
-          onClick={() => setView("rounds")}>
-          🎾 Start Tournament
-        </button>
+          onClick={() => setView("rounds")}>🎾 Start Tournament</button>
       )}
       {players.length > 0 && players.length < numCourts * 4 && (
         <p style={{ textAlign: "center", color: C.coral, fontSize: 13, marginTop: 10 }}>
@@ -467,13 +669,15 @@ export default function App() {
         <ul style={{ margin: 0, padding: "0 0 0 16px", color: C.dimmed, fontSize: 12, lineHeight: 2 }}>
           <li>2v2 on each court simultaneously</li>
           <li>Win = 2 pts · Draw = 1 pt · Loss = 0 pts</li>
-          <li>★ Players who rested last round are prioritized</li>
+          <li>Suggestions avoid repeat partners &amp; opponents</li>
+          <li>Players with fewest games played get priority</li>
+
         </ul>
       </div>
     </div>
   );
 
-  // ── Rounds view ───────────────────────────────────────────────
+  // ── Rounds ────────────────────────────────────────────────────
   const RoundsView = (
     <div style={pageStyle}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
@@ -488,9 +692,7 @@ export default function App() {
         <RoundRow key={i} roundIdx={i} round={round} onClick={() => setEditing(i)} />
       ))}
 
-      {/* Start next round button */}
-      <button
-        onClick={() => setEditing("new")}
+      <button onClick={() => setEditing("new")}
         style={{ ...btn("primary"), width: "100%", padding: 14, fontSize: 15, marginTop: 4 }}>
         + Start Round {rounds.length + 1}
       </button>
@@ -504,10 +706,18 @@ export default function App() {
     </div>
   );
 
-  // ── Standings view ────────────────────────────────────────────
+  // ── Standings ─────────────────────────────────────────────────
   const StandingsView = (
     <div style={pageStyle}>
-      <h2 style={{ margin: "0 0 4px", fontSize: 22, fontWeight: 800 }}>Standings</h2>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+        <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800 }}>Standings</h2>
+        {standings.length > 0 && (
+          <button onClick={() => runExportPDF(standings, rounds)}
+            style={{ ...btn("primary"), padding: "8px 14px", fontSize: 12 }}>
+            ⬇ Export PDF
+          </button>
+        )}
+      </div>
       <p style={{ margin: "0 0 18px", color: C.muted, fontSize: 13 }}>Match pts · Game pts as tiebreaker</p>
 
       {standings.length === 0 && <p style={{ color: C.muted }}>No players yet.</p>}
@@ -532,14 +742,19 @@ export default function App() {
               <div style={medalStyle(rank)}>{rank + 1}</div>
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 800, fontSize: 15 }}>{p.name}</div>
+
               </div>
               <div style={{ textAlign: "right" }}>
                 <div style={{ fontSize: 22, fontWeight: 900, color: rank < 3 ? C.sand : C.white }}>{p.matchPoints}</div>
                 <div style={{ fontSize: 10, color: C.muted }}>match pts</div>
               </div>
               <div style={{ textAlign: "right", minWidth: 36 }}>
-                <div style={{ fontSize: 16, fontWeight: 700, color: C.dimmed }}>{p.gamePoints}</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: C.dimmed }}>{p.gamePoints}</div>
                 <div style={{ fontSize: 10, color: C.muted }}>game pts</div>
+              </div>
+              <div style={{ textAlign: "right", minWidth: 28 }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: C.muted }}>{p.gamesPlayed}</div>
+                <div style={{ fontSize: 10, color: C.muted }}>played</div>
               </div>
             </div>
             <div style={{ display: "flex", gap: 3, marginTop: 10, flexWrap: "wrap" }}>
@@ -557,7 +772,6 @@ export default function App() {
 
   return (
     <div style={appStyle}>
-      {/* Header */}
       <div style={headerStyle}>
         <span style={{ fontSize: 18, fontWeight: 800, letterSpacing: "0.04em" }}>
           PADEL <span style={{ color: C.sand }}>//</span> AMERICANO
@@ -565,12 +779,10 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ background: C.sand, color: "#0d1f2d", fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20 }}>FUN</span>
           <button onClick={() => setConfirmReset(true)}
-            style={{ background: "transparent", border: "none", color: C.muted, fontSize: 18, cursor: "pointer", padding: "0 2px" }}
-            title="Reset">↺</button>
+            style={{ background: "transparent", border: "none", color: C.muted, fontSize: 18, cursor: "pointer", padding: "0 2px" }}>↺</button>
         </div>
       </div>
 
-      {/* Nav */}
       {view !== "setup" && (
         <div style={navStyle}>
           <button style={navBtn(view === "rounds")} onClick={() => setView("rounds")}>Rounds</button>
@@ -583,7 +795,6 @@ export default function App() {
       {view === "rounds"    && RoundsView}
       {view === "standings" && StandingsView}
 
-      {/* Round modal */}
       {editingRound !== null && (
         <RoundModal
           roundIdx={editIdx}
@@ -596,13 +807,12 @@ export default function App() {
         />
       )}
 
-      {/* Reset confirm */}
       {confirmReset && (
         <div style={overlayStyle} onClick={() => setConfirmReset(false)}>
           <div style={{ ...modalStyle, maxWidth: 300, textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
             <div style={{ fontSize: 28, marginBottom: 10 }}>⚠️</div>
             <h3 style={{ margin: "0 0 8px", fontSize: 16, fontWeight: 800 }}>Reset tournament?</h3>
-            <p style={{ margin: "0 0 20px", color: C.muted, fontSize: 13 }}>Clears all players, rounds and scores from this device.</p>
+            <p style={{ margin: "0 0 20px", color: C.muted, fontSize: 13 }}>Clears all players, rounds and scores.</p>
             <div style={{ display: "flex", gap: 8 }}>
               <button style={{ ...btn("ghost"), flex: 1 }} onClick={() => setConfirmReset(false)}>Cancel</button>
               <button style={{ ...btn("danger"), flex: 1 }} onClick={resetAll}>Reset</button>
