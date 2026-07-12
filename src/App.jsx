@@ -376,7 +376,7 @@ const navStyle     = { display: "flex", gap: 4, padding: "10px 14px", background
 const pageStyle    = { maxWidth: 640, margin: "0 auto", padding: "18px 14px" };
 const cardStyle    = { background: C.card, borderRadius: 12, padding: "14px 16px", marginBottom: 10, border: "1px solid rgba(91,127,166,0.2)" };
 const labelStyle   = { fontSize: 11, color: C.muted, letterSpacing: "0.09em", textTransform: "uppercase", marginBottom: 5, display: "block" };
-const inputStyle   = { background: "#0a1824", border: `1px solid ${C.muted}`, color: C.white, borderRadius: 8, padding: "9px 10px", fontSize: 14, outline: "none", width: "100%", boxSizing: "border-box" };
+const inputStyle   = { background: "#0a1824", border: `1px solid ${C.muted}`, color: C.white, borderRadius: 8, padding: "9px 10px", fontSize: 16, outline: "none", width: "100%", boxSizing: "border-box" };
 const overlayStyle = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.82)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: "0 10px" };
 const modalStyle   = { background: C.surface, borderRadius: 16, padding: "20px 16px", width: "100%", maxWidth: 460, border: `1px solid ${C.muted}`, maxHeight: "92vh", overflowY: "auto" };
 
