@@ -323,22 +323,50 @@ const runExportPDF = async (standings, rounds) => {
 
   doc.save("padel-americano-results.pdf");
 };
-
-
+const recalcStandings = (players, rounds) => {
   const totals = {};
-  players.forEach((p) => { totals[p.name] = { matchPoints: 0, gamePoints: 0, gamesPlayed: 0 }; });
+
+  players.forEach((p) => {
+    totals[p.name] = {
+      matchPoints: 0,
+      gamePoints: 0,
+      gamesPlayed: 0,
+    };
+  });
+
   rounds.forEach((round) => {
     if (!round) return;
+
     round.courts.forEach((court) => {
       if (!court || court.scoreA == null) return;
+
       const { teamA, teamB, scoreA, scoreB } = court;
+
       const mpA = scoreA > scoreB ? 2 : scoreA === scoreB ? 1 : 0;
       const mpB = scoreB > scoreA ? 2 : scoreA === scoreB ? 1 : 0;
-      teamA.filter(Boolean).forEach((n) => { if (totals[n]) { totals[n].matchPoints += mpA; totals[n].gamePoints += scoreA; totals[n].gamesPlayed++; } });
-      teamB.filter(Boolean).forEach((n) => { if (totals[n]) { totals[n].matchPoints += mpB; totals[n].gamePoints += scoreB; totals[n].gamesPlayed++; } });
+
+      teamA.filter(Boolean).forEach((n) => {
+        if (totals[n]) {
+          totals[n].matchPoints += mpA;
+          totals[n].gamePoints += scoreA;
+          totals[n].gamesPlayed++;
+        }
+      });
+
+      teamB.filter(Boolean).forEach((n) => {
+        if (totals[n]) {
+          totals[n].matchPoints += mpB;
+          totals[n].gamePoints += scoreB;
+          totals[n].gamesPlayed++;
+        }
+      });
     });
   });
-  return players.map((p) => ({ ...p, ...totals[p.name] }));
+
+  return players.map((p) => ({
+    ...p,
+    ...totals[p.name],
+  }));
 };
 
 // ── Static styles ─────────────────────────────────────────────────
